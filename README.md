@@ -1,52 +1,36 @@
-# Telegram-бот: ИИ-аналитик таблиц и графиков
+# Telegram Table & Chart AI — Cloudflare Workers AI
 
-Бот принимает Excel, CSV/TSV/TXT, фотографии таблиц и текстовые таблицы. Он очищает типичные ошибки форматов, предлагает график по смыслу, строит PNG, экспортирует Excel и формирует локальную статистику. При наличии Groq API ключа распознаёт таблицы на фото и добавляет ИИ-комментарий.
+Telegram-бот для чтения таблиц, анализа данных, автоматического подбора графиков по смыслу и экспорта PNG/Excel. Запускается как обычное Python-приложение (например, на FadeHost); сам бот не нужно переносить в Cloudflare Workers.
 
 ## Возможности
-- Вход: `.xlsx`, `.xlsm`, `.csv`, `.tsv`, `.txt`, фотографии и таблицы, вставленные текстом.
-- Улучшенная обработка чисел с десятичной запятой/точкой, пустых строк, повторяющихся заголовков и дат.
-- Автоподбор: линия, столбцы, доли, распределение, связь числовых показателей.
-- Графики: линейный, столбчатый, накопительный, область, scatter с линией тренда, круговой, гистограмма, boxplot, тепловая карта корреляций.
-- Статистика: среднее, медиана, min/max, пропуски, повторяющиеся строки, потенциальные выбросы, корреляции.
-- Экспорт PNG + Excel с данными и изображением графика.
-- Groq API используется для OCR фото и ИИ-комментария. Локальная обработка и графики работают и без API-ключа.
 
-## Настройка Groq
-1. Создай ключ на https://console.groq.com/keys.
-2. В FadeHost → Environment Variables добавь `GROQ_API_KEY`.
-3. Модель по умолчанию `qwen/qwen3.8-27b` — проверь, что она доступна в твоём Groq Console и поддерживает vision в твоём аккаунте. При необходимости поменяй `GROQ_MODEL` на актуальную vision-модель из каталога Groq.
-4. Не помещай настоящий ключ в GitHub. Ключ добавляется только в секреты FadeHost.
+- Входные данные: Excel (`.xlsx`, `.xlsm`), CSV, TSV, TXT, вставленная текстовая таблица и фото таблицы.
+- Очистка данных: пустые строки/столбцы, дубликаты названий колонок, числа с десятичной запятой, распознавание дат.
+- Автоподбор графика по типам столбцов, названиям показателей и структуре данных.
+- Типы графиков: линия, столбцы, накопительные столбцы, области, scatter с линией тренда, круговая диаграмма, гистограмма, box plot, тепловая карта корреляций, комбинированный график, скользящее среднее, Парето.
+- Анализ: описательная статистика, пропуски, дубликаты, возможные выбросы, корреляции и текстовый комментарий ИИ.
+- Экспорт PNG и Excel с листом данных и изображением графика.
+- Если API временно недоступен, локальный анализ таблиц и построение графиков продолжают работать. Распознавание фото требует API.
 
-Groq имеет бесплатный план с ограничениями и может менять доступность моделей/квоты. API не гарантированно бесплатен без ограничений.
+## Настройка
 
-## Развёртывание на FadeHost
-- Runtime: Python
-- Install dependencies: `pip install -r requirements.txt`
-- Start command: `python bot.py`
-- Environment variables:
-  - `TELEGRAM_BOT_TOKEN` — токен Telegram-бота от @BotFather.
-  - `GROQ_API_KEY` — API key Groq.
-  - `GROQ_MODEL` — необязательно, по умолчанию `qwen/qwen3.8-27b`.
+1. Создайте Telegram-бота через `@BotFather` и получите токен.
+2. В Cloudflare Dashboard откройте Workers AI. Найдите Account ID.
+3. Создайте API Token с минимально необходимыми разрешениями для Workers AI. Не используйте глобальный API key и не публикуйте токен.
+4. При первом использовании модели `@cf/meta/llama-3.2-11b-vision-instruct` может потребоваться принять лицензию Meta. Официальная инструкция: https://developers.cloudflare.com/workers-ai/models/llama-3.2-11b-vision-instruct/
+5. В переменных окружения хостинга (FadeHost) добавьте:
+   - `TELEGRAM_BOT_TOKEN`
+   - `CLOUDFLARE_ACCOUNT_ID`
+   - `CLOUDFLARE_AUTH_TOKEN`
+   - необязательно `CF_VISION_MODEL` и `CF_TEXT_MODEL` (значения по умолчанию указаны в `.env.example`).
+6. Установите зависимости из `requirements.txt`; команда запуска: `python bot.py`.
 
-## Обновить существующий GitHub-репозиторий на Mac
-Скачай ZIP, распакуй его. Скопируй файлы из папки проекта в существующий клон репозитория `telegram-table-chart-bot`, а затем в Terminal:
+## Бесплатный лимит
 
-```bash
-cd ~/Downloads/telegram-table-chart-bot
-git status
-git add bot.py requirements.txt .gitignore .env.example README.md
-git commit -m "Upgrade table analysis and Groq vision"
-git push
-```
+У Workers AI есть бесплатная дневная квота, но она ограничена и зависит от актуальных условий аккаунта/модели. Проверяйте потребление в Cloudflare Dashboard и текущие условия здесь: https://developers.cloudflare.com/workers-ai/platform/pricing/ . Не считайте API безлимитным.
 
-Если ты распаковывала ZIP в `~/Downloads/telegram-table-chart-agent`, скопируй файлы так:
+## Примечания
 
-```bash
-cp ~/Downloads/telegram-table-chart-agent/bot.py ~/Downloads/telegram-table-chart-bot/
-cp ~/Downloads/telegram-table-chart-agent/requirements.txt ~/Downloads/telegram-table-chart-bot/
-cp ~/Downloads/telegram-table-chart-agent/.gitignore ~/Downloads/telegram-table-chart-bot/
-cp ~/Downloads/telegram-table-chart-agent/.env.example ~/Downloads/telegram-table-chart-bot/
-cp ~/Downloads/telegram-table-chart-agent/README.md ~/Downloads/telegram-table-chart-bot/
-```
-
-Не запускай повторно `git init` или `git remote add origin`, если репозиторий уже настроен.
+- Для локального запуска скопируйте `.env.example` в `.env` и заполните значения. Не коммитьте `.env` в GitHub.
+- На FadeHost добавляйте секреты в настройки переменных окружения, а не в исходный код.
+- ИИ-комментарий — вспомогательный: проверяйте выводы по исходным данным. Корреляция не доказывает причинность.

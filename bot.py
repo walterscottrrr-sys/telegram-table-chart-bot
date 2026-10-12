@@ -14,15 +14,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
-from groq import Groq
+import requests
 from PIL import Image, ImageOps, ImageEnhance
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-GROQ_KEY = os.getenv("GROQ_API_KEY", "").strip()
-GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b").strip()
+CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+CLOUDFLARE_AUTH_TOKEN = os.getenv("CLOUDFLARE_AUTH_TOKEN", "").strip()
+CF_VISION_MODEL = os.getenv("CF_VISION_MODEL", "@cf/meta/llama-3.2-11b-vision-instruct").strip()
+CF_TEXT_MODEL = os.getenv("CF_TEXT_MODEL", "@cf/meta/llama-3.1-8b-instruct-fp8-fast").strip()
 MAX_ROWS = 5000
 MAX_COLS = 30
 
@@ -33,7 +35,7 @@ log = logging.getLogger("table-chart-bot")
 NAMES = {
     "line": "Линейный график", "bar": "Столбчатая диаграмма", "stacked": "Накопительная диаграмма",
     "area": "График с областями", "scatter": "Точечная диаграмма", "pie": "Круговая диаграмма",
-    "hist": "Гистограмма распределения", "box": "Диаграмма размаха", "heatmap": "Тепловая карта корреляций",
+    "hist": "Гистограмма распределения", "box": "Диаграмма размаха", "heatmap": "Тепловая карта корреляций", "combo": "Комбинированный график", "rolling": "Динамика со скользящим средним", "pareto": "Диаграмма Парето",
 }
 CHART_ROWS = [
     [InlineKeyboardButton("✨ Подобрать по смыслу", callback_data="chart:auto")],
@@ -42,6 +44,8 @@ CHART_ROWS = [
     [InlineKeyboardButton("🔵 Связь X–Y", callback_data="chart:scatter"), InlineKeyboardButton("🥧 Доли", callback_data="chart:pie")],
     [InlineKeyboardButton("📉 Распределение", callback_data="chart:hist"), InlineKeyboardButton("📦 Размах", callback_data="chart:box")],
     [InlineKeyboardButton("🌡 Корреляции", callback_data="chart:heatmap")],
+    [InlineKeyboardButton("📊➕📈 Комбинированный", callback_data="chart:combo"), InlineKeyboardButton("〰️ Скользящее среднее", callback_data="chart:rolling")],
+    [InlineKeyboardButton("🏆 Парето", callback_data="chart:pareto")],
 ]
 KEYBOARD = InlineKeyboardMarkup(CHART_ROWS)
 
@@ -154,11 +158,37 @@ def parse_file(filename, content):
     return clean_df(df)
 
 
-def groq_client():
-    if not GROQ_KEY:
-        raise RuntimeError("Добавь GROQ_API_KEY в переменные окружения FadeHost.")
-    return Groq(api_key=GROQ_KEY, timeout=90.0, max_retries=1)
+def cloudflare_run(model, payload):
+    """Call Cloudflare Workers AI REST API using account ID and scoped API token."""
+    if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_AUTH_TOKEN:
+        raise RuntimeError("Добавь CLOUDFLARE_ACCOUNT_ID и CLOUDFLARE_AUTH_TOKEN в переменные окружения FadeHost.")
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{model}"
+    try:
+        response = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {CLOUDFLARE_AUTH_TOKEN}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=90,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Не удалось подключиться к Cloudflare Workers AI: {exc}") from exc
+    try:
+        body = response.json()
+    except ValueError:
+        raise RuntimeError(f"Cloudflare вернул не JSON (HTTP {response.status_code}).")
+    if not response.ok or body.get("success") is False:
+        errors = body.get("errors") or []
+        detail = "; ".join(str(e.get("message", e)) for e in errors) or f"HTTP {response.status_code}"
+        raise RuntimeError(f"Ошибка Cloudflare Workers AI: {detail}")
+    return body.get("result", {})
 
+
+def response_text(result):
+    if isinstance(result, str):
+        return result
+    if isinstance(result, dict):
+        return str(result.get("response") or result.get("text") or result.get("description") or json.dumps(result, ensure_ascii=False))
+    return str(result)
 
 def extract_json(raw):
     raw = (raw or "").strip()
@@ -172,7 +202,6 @@ def extract_json(raw):
 
 def ocr_photo(content):
     """Read a photo using Groq's vision-capable Qwen model."""
-    client = groq_client()
     image = Image.open(io.BytesIO(content))
     image = ImageOps.exif_transpose(image).convert("RGB")
     # Enhance readability while keeping payload modest.
@@ -182,17 +211,15 @@ def ocr_photo(content):
     image.save(buf, format="JPEG", quality=92, optimize=True)
     encoded = base64.b64encode(buf.getvalue()).decode("ascii")
     prompt = """Ты OCR-агент для таблиц. Внимательно перепиши таблицу с изображения, сохранив порядок строк и столбцов. Верни ТОЛЬКО JSON вида {\"columns\":[\"Месяц\",\"Продажи\"],\"rows\":[[\"Январь\",120],[\"Февраль\",150]]}. Не додумывай цифры и не исправляй данные по смыслу. Нечитаемые/пустые ячейки обозначай null. Числа верни числами, даты и подписи — строками. Если есть несколько таблиц, выбери самую крупную основную таблицу. Если таблица совсем нечитаема, верни {\"columns\":[],\"rows\":[]}."""
-    response = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[{"role": "user", "content": [
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}},
-        ]}],
-        temperature=0.1,
-        max_completion_tokens=6000,
-        response_format={"type": "json_object"},
-    )
-    data = extract_json(response.choices[0].message.content)
+    result = cloudflare_run(CF_VISION_MODEL, {
+        "prompt": prompt,
+        "image": f"data:image/jpeg;base64,{encoded}",
+        "max_tokens": 6000,
+        "temperature": 0.1,
+    })
+    raw = response_text(result)
+    # Vision model may wrap JSON in prose or markdown; extract_json handles code fences.
+    data = extract_json(raw)
     if not data.get("columns") or not data.get("rows"):
         raise ValueError("Не удалось распознать таблицу. Попробуй фото сверху, при хорошем освещении, или обрежь изображение вокруг таблицы.")
     columns = data["columns"]
@@ -221,11 +248,18 @@ def recommend_chart(df):
     nums = numeric_cols(df)
     dates = date_cols(df)
     cats = categorical_cols(df)
-    if len(nums) >= 2 and dates:
-        return "line", f"Есть временной столбец «{dates[0]}» и несколько числовых показателей — линия лучше показывает динамику."
+    # Use column names and data shape as semantic hints, not just dtypes.
+    date_like = dates or [c for c in df.columns if re.search(r"дата|месяц|год|время|date|month|year|time|week|недел", str(c), re.I)]
+    metric_like = [c for c in nums if re.search(r"выруч|продаж|доход|расход|прибыл|цена|стоим|sales|revenue|profit|cost|amount|колич|quantity|count|score|оцен", str(c), re.I)]
+    if len(nums) >= 2 and date_like:
+        if len(nums) >= 2 and any(re.search(r"план|факт|plan|actual|цель|target", str(c), re.I) for c in nums):
+            return "combo", f"Похоже, таблица содержит временной ряд и показатели для сравнения; комбинированный график поможет сопоставить значения и динамику. Временной столбец: «{date_like[0]}»."
+        return "line", f"Есть временной столбец «{date_like[0]}» и несколько числовых показателей — линия лучше показывает динамику."
     if len(nums) >= 2 and not cats and len(df) >= 8:
         return "scatter", "Два и более числовых показателя без категорий: точечная диаграмма поможет увидеть взаимосвязь."
     if nums and cats:
+        if re.search(r"причин|категор|товар|продукт|ошиб|жалоб|регион|клиент|источник|reason|category|product|error|issue|region|customer|source", str(cats[0]), re.I):
+            return "pareto", f"Есть категории («{cats[0]}») и числовой показатель («{nums[0]}»): Парето поможет увидеть, какие категории дают наибольший вклад."
         unique_n = df[cats[0]].nunique(dropna=True)
         if len(nums) == 1 and 2 <= unique_n <= 6 and len(df) <= 8:
             return "pie", "Небольшое число категорий и один числовой показатель — можно показать состав долей."
@@ -266,21 +300,23 @@ def chart_data_summary(df):
 
 def ai_insights(df, kind, recommendation):
     """AI narrative is optional: local numerical summary is always available."""
-    if not GROQ_KEY:
+    if not (CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_AUTH_TOKEN):
         return None
     summary = chart_data_summary(df)
     sample = df.head(12).replace({np.nan: None}).to_dict(orient="records")
     prompt = f"""Ты аналитик данных. Отвечай на русском. Ни в коем случае не выдумывай числа. Используй только сводку и пример строк ниже. Отличай корреляцию от причинности. Кратко: 3-6 пунктов с конкретными наблюдениями, качеством данных и одним практичным следующим шагом. Если данных недостаточно, прямо скажи. Тип графика: {NAMES.get(kind, kind)}. Причина автоподбора: {recommendation}. Сводка: {json.dumps(summary, ensure_ascii=False, default=str)}. Пример первых строк: {json.dumps(sample, ensure_ascii=False, default=str)}"""
     try:
-        response = groq_client().chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[{"role": "system", "content": "Ты точный аналитик данных. Не придумывай значения, не делай причинных выводов по корреляции."}, {"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_completion_tokens=700,
-        )
-        return (response.choices[0].message.content or "").strip()[:3500] or None
+        result = cloudflare_run(CF_TEXT_MODEL, {
+            "messages": [
+                {"role": "system", "content": "Ты точный аналитик данных. Не придумывай значения, не делай причинных выводов по корреляции."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 900,
+        })
+        return response_text(result).strip()[:3500] or None
     except Exception:
-        log.exception("Groq analysis unavailable; using local statistics")
+        log.exception("Cloudflare AI analysis unavailable; using local statistics")
         return None
 
 
@@ -404,6 +440,51 @@ def make_chart(df, kind):
         ax.grid(axis="y", alpha=.25)
         ax.legend(loc="best", fontsize=8)
 
+    elif kind == "combo":
+        if len(nums) < 2:
+            raise ValueError("Для комбинированного графика нужны минимум два числовых столбца: столбцы + линия.")
+        d = df.copy().head(40)
+        if x:
+            d = d.dropna(subset=[x])
+            if pd.api.types.is_datetime64_any_dtype(d[x]): d = d.sort_values(x)
+            labels = d[x].astype(str).tolist()
+        else:
+            labels = [str(i + 1) for i in range(len(d))]
+        left = pd.to_numeric(d[nums[0]], errors="coerce")
+        right = pd.to_numeric(d[nums[1]], errors="coerce")
+        positions = np.arange(len(d))
+        ax.bar(positions, left, alpha=.72, label=nums[0])
+        ax2 = ax.twinx()
+        ax2.plot(positions, right, color="tab:red", marker="o", label=nums[1])
+        ax.set_xticks(positions); ax.set_xticklabels(labels, rotation=35 if len(labels)>8 else 0, ha="right" if len(labels)>8 else "center")
+        ax.set_title("Сравнение двух показателей: столбцы + линия"); ax.set_xlabel(x or "Строка"); ax.set_ylabel(nums[0]); ax2.set_ylabel(nums[1])
+        h1,l1=ax.get_legend_handles_labels(); h2,l2=ax2.get_legend_handles_labels(); ax.legend(h1+h2,l1+l2,loc="best")
+        ax.grid(axis="y", alpha=.2)
+
+    elif kind == "rolling":
+        if not nums: raise ValueError("Для скользящего среднего нужен числовой столбец.")
+        col = nums[0]; d = df.copy().head(500)
+        if x and pd.api.types.is_datetime64_any_dtype(d[x]): d = d.sort_values(x)
+        vals = pd.to_numeric(d[col], errors="coerce")
+        window = max(2, min(7, len(d)//5 or 2))
+        ax.plot(range(len(d)), vals, alpha=.45, label=col)
+        ax.plot(range(len(d)), vals.rolling(window=window, min_periods=1).mean(), linewidth=2.5, label=f"Скользящее среднее ({window})")
+        if x:
+            labels=d[x].astype(str).tolist(); ax.set_xticks(range(len(d))); ax.set_xticklabels(labels, rotation=35 if len(labels)>8 else 0, ha="right" if len(labels)>8 else "center")
+        ax.set_title(f"Динамика и сглаживание: {col}"); ax.set_xlabel(x or "Номер строки"); ax.set_ylabel(col); ax.legend(); ax.grid(True, alpha=.25)
+
+    elif kind == "pareto":
+        if not nums or not cats: raise ValueError("Для Парето нужны категориальный столбец и числовой показатель.")
+        d = df[[cats[0], nums[0]]].copy().dropna()
+        d[cats[0]] = d[cats[0]].astype(str)
+        d = d.groupby(cats[0], as_index=False)[nums[0]].sum().sort_values(nums[0], ascending=False).head(20)
+        total = d[nums[0]].sum()
+        if d.empty or total == 0: raise ValueError("Нет значений для диаграммы Парето.")
+        cumulative = d[nums[0]].cumsum()/total*100
+        positions=np.arange(len(d)); ax.bar(positions,d[nums[0]],alpha=.75,label=nums[0]); ax.set_xticks(positions); ax.set_xticklabels(d[cats[0]],rotation=40,ha="right")
+        ax2=ax.twinx(); ax2.plot(positions,cumulative,color="tab:red",marker="o",label="Накопленная доля, %"); ax2.set_ylim(0,110); ax2.set_ylabel("Накопленная доля, %")
+        ax.set_title("Парето: вклад категорий по убыванию"); ax.set_ylabel(nums[0]); h1,l1=ax.get_legend_handles_labels(); h2,l2=ax2.get_legend_handles_labels(); ax.legend(h1+h2,l1+l2,loc="best"); ax.grid(axis="y",alpha=.2)
+
     else:
         raise ValueError("Неизвестный тип графика.")
 
@@ -487,8 +568,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1) Отправь .xlsx/.xlsm, .csv/.tsv/.txt, фото или таблицу текстом.\n"
         "2) Нажми «Подобрать по смыслу» или выбери график вручную.\n"
         "3) Получи PNG, Excel и анализ.\n\n"
-        "Виды: линия, столбцы, накопительные столбцы, области, связь X–Y, доли, распределение, размах, тепловая карта корреляций.\n"
-        "Для чтения фото и ИИ-комментария нужен GROQ_API_KEY. Без него файлы и текстовые таблицы работают, а автоподбор и базовая статистика доступны локально."
+        "Виды: линия, столбцы, накопительные столбцы, области, связь X–Y, доли, распределение, размах, корреляции, комбинированный, скользящее среднее, Парето.\n"
+        "Для чтения фото и ИИ-комментария нужны CLOUDFLARE_ACCOUNT_ID и CLOUDFLARE_AUTH_TOKEN. Без них файлы и текстовые таблицы работают, а автоподбор и базовая статистика доступны локально."
     )
 
 
@@ -531,8 +612,8 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
-    if not GROQ_KEY:
-        await msg.reply_text("Для распознавания фото добавь GROQ_API_KEY в переменные окружения FadeHost. Excel, CSV и текстовые таблицы работают без API.")
+    if not (CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_AUTH_TOKEN):
+        await msg.reply_text("Для распознавания фото добавь CLOUDFLARE_ACCOUNT_ID и CLOUDFLARE_AUTH_TOKEN в переменные окружения FadeHost. Excel, CSV и текстовые таблицы работают без API.")
         return
     try:
         f = await msg.photo[-1].get_file()
@@ -580,7 +661,7 @@ async def chart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ai = await asyncio.to_thread(ai_insights, df, kind, why)
         if ai:
             report += "\n\n🤖 Комментарий ИИ (проверь выводы по исходным данным):\n" + ai
-        elif GROQ_KEY:
+        elif CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_AUTH_TOKEN:
             report += "\n\nИИ-комментарий сейчас недоступен; выше приведена локальная статистика."
         await q.message.reply_text(report[:3900])
         await q.message.reply_text("Хочешь сравнить другой тип графика или прислать новую таблицу?", reply_markup=KEYBOARD)
@@ -596,7 +677,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("cancel", cancel))
-    app.add_handler(CallbackQueryHandler(chart_handler, pattern=r"^chart:(auto|line|bar|stacked|area|scatter|pie|hist|box|heatmap)$"))
+    app.add_handler(CallbackQueryHandler(chart_handler, pattern=r"^chart:(auto|line|bar|stacked|area|scatter|pie|hist|box|heatmap|combo|rolling|pareto)$"))
     app.add_handler(MessageHandler(filters.Document.ALL, document_handler))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
