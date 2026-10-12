@@ -1,18 +1,18 @@
-import asyncio, io, json, logging, os, re
+import asyncio, base64, io, json, logging, os, re
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 from dotenv import load_dotenv
-from google import genai
+import anthropic
 from PIL import Image
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-GEMINI_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
+CLAUDE_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6").strip()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("table-chart-bot")
@@ -63,12 +63,22 @@ def parse_file(filename, content):
     return clean_df(df)
 
 def ocr_photo(content):
-    if not GEMINI_KEY: raise RuntimeError("Для фото таблиц добавь GEMINI_API_KEY в настройках FadeHost.")
-    client = genai.Client(api_key=GEMINI_KEY)
+    if not CLAUDE_KEY: raise RuntimeError("Для фото таблиц добавь ANTHROPIC_API_KEY в настройках FadeHost.")
     image = Image.open(io.BytesIO(content)).convert("RGB")
-    prompt = '''Перенеси видимую таблицу с изображения в JSON. Верни ТОЛЬКО JSON формата {"columns":["Имя","Значение"],"rows":[["A",12],["B",15]]}. Не придумывай значения. Пустые/нечитаемые ячейки — null. Сохраняй порядок. Если таблицу невозможно прочитать, верни {"columns":[],"rows":[]}'''
-    response = client.models.generate_content(model=GEMINI_MODEL, contents=[prompt, image])
-    raw = (response.text or "").strip()
+    buf = io.BytesIO()
+    image.save(buf, format="JPEG", quality=90)
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    client = anthropic.Anthropic(api_key=CLAUDE_KEY)
+    prompt = """Перенеси видимую таблицу с изображения в JSON. Верни ТОЛЬКО JSON формата {"columns":["Имя","Значение"],"rows":[["A",12],["B",15]]}. Не придумывай значения. Пустые/нечитаемые ячейки — null. Сохраняй порядок. Если таблицу невозможно прочитать, верни {"columns":[],"rows":[]}"""
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=4096,
+        messages=[{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": encoded}},
+            {"type": "text", "text": prompt},
+        ]}],
+    )
+    raw = "\n".join(block.text for block in response.content if getattr(block, "type", None) == "text").strip()
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
     raw = re.sub(r"\s*```$", "", raw)
     data = json.loads(raw)
@@ -158,7 +168,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("Привет! Отправь Excel (.xlsx), CSV, фото таблицы или вставь данные текстом. Затем выбери тип графика — пришлю PNG, Excel с графиком и краткий анализ.\n\n/help — инструкция\n/cancel — сбросить текущую таблицу")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text("1) Отправь .xlsx, .csv, фото или таблицу текстом.\n2) Выбери тип графика кнопкой.\n3) Получи изображение, Excel и краткий анализ.\n\nТипы: линейный, столбчатый, точечный, круговой, гистограмма. Для распознавания фото нужен GEMINI_API_KEY.")
+    await update.effective_message.reply_text("1) Отправь .xlsx, .csv, фото или таблицу текстом.\n2) Выбери тип графика кнопкой.\n3) Получи изображение, Excel и краткий анализ.\n\nТипы: линейный, столбчатый, точечный, круговой, гистограмма. Для распознавания фото нужен ANTHROPIC_API_KEY.")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("df", None)
@@ -184,7 +194,7 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if not GEMINI_KEY:
-        await msg.reply_text("Для фото добавь GEMINI_API_KEY в переменные окружения FadeHost. Excel, CSV и текст работают без Gemini."); return
+        await msg.reply_text("Для фото добавь ANTHROPIC_API_KEY в переменные окружения FadeHost. Excel, CSV и текст работают без Claude."); return
     try:
         f = await msg.photo[-1].get_file(); content = bytes(await f.download_as_bytearray())
         await msg.reply_text("🔎 Распознаю таблицу на фото…")
