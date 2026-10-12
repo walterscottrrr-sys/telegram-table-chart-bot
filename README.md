@@ -1,77 +1,52 @@
-# Telegram-бот для графиков по таблицам
+# Telegram-бот: ИИ-аналитик таблиц и графиков
 
-Бот принимает Excel, CSV, фото таблиц и таблицы, вставленные текстом в Telegram. Пользователь выбирает тип графика; бот отправляет PNG, Excel с исходными данными и встроенным графиком, а также краткую статистику.
+Бот принимает Excel, CSV/TSV/TXT, фотографии таблиц и текстовые таблицы. Он очищает типичные ошибки форматов, предлагает график по смыслу, строит PNG, экспортирует Excel и формирует локальную статистику. При наличии Groq API ключа распознаёт таблицы на фото и добавляет ИИ-комментарий.
 
 ## Возможности
-- Вход: `.xlsx`, `.xlsm`, `.csv`, `.txt`, фото и текстовая таблица.
-- Типы: линейный, столбчатый, точечный, круговой, гистограмма.
-- Выход: PNG, Excel-книга с листами «Данные» и «График», краткий анализ.
-- Claude API нужен только для распознавания фото. Excel/CSV/текст работают без Claude.
+- Вход: `.xlsx`, `.xlsm`, `.csv`, `.tsv`, `.txt`, фотографии и таблицы, вставленные текстом.
+- Улучшенная обработка чисел с десятичной запятой/точкой, пустых строк, повторяющихся заголовков и дат.
+- Автоподбор: линия, столбцы, доли, распределение, связь числовых показателей.
+- Графики: линейный, столбчатый, накопительный, область, scatter с линией тренда, круговой, гистограмма, boxplot, тепловая карта корреляций.
+- Статистика: среднее, медиана, min/max, пропуски, повторяющиеся строки, потенциальные выбросы, корреляции.
+- Экспорт PNG + Excel с данными и изображением графика.
+- Groq API используется для OCR фото и ИИ-комментария. Локальная обработка и графики работают и без API-ключа.
 
-## 1. Создай Telegram-бота
-1. В Telegram открой `@BotFather`.
-2. Отправь `/newbot` и следуй инструкциям.
-3. Сохрани токен в безопасном месте. Не публикуй его и не загружай в GitHub.
+## Настройка Groq
+1. Создай ключ на https://console.groq.com/keys.
+2. В FadeHost → Environment Variables добавь `GROQ_API_KEY`.
+3. Модель по умолчанию `qwen/qwen3.8-27b` — проверь, что она доступна в твоём Groq Console и поддерживает vision в твоём аккаунте. При необходимости поменяй `GROQ_MODEL` на актуальную vision-модель из каталога Groq.
+4. Не помещай настоящий ключ в GitHub. Ключ добавляется только в секреты FadeHost.
 
-## 2. Получи Gemini API key для фото
-1. Открой https://aistudio.google.com/apikey
-2. Создай API key.
-3. Не публикуй ключ. Распознавание фото зависит от квот и доступности модели.
-Если фото не нужны, `GEMINI_API_KEY` можно не задавать.
+Groq имеет бесплатный план с ограничениями и может менять доступность моделей/квоты. API не гарантированно бесплатен без ограничений.
 
-## 3. Загрузка в GitHub
-1. Создай отдельный новый репозиторий, например `telegram-table-chart-bot`.
-2. Загрузи `bot.py`, `requirements.txt`, `.gitignore`, `README.md`, `.env.example`.
-3. Не загружай файл `.env` с настоящими ключами.
+## Развёртывание на FadeHost
+- Runtime: Python
+- Install dependencies: `pip install -r requirements.txt`
+- Start command: `python bot.py`
+- Environment variables:
+  - `TELEGRAM_BOT_TOKEN` — токен Telegram-бота от @BotFather.
+  - `GROQ_API_KEY` — API key Groq.
+  - `GROQ_MODEL` — необязательно, по умолчанию `qwen/qwen3.8-27b`.
 
-Через Terminal в папке проекта (замени `YOUR-USERNAME` на свой GitHub-логин):
+## Обновить существующий GitHub-репозиторий на Mac
+Скачай ZIP, распакуй его. Скопируй файлы из папки проекта в существующий клон репозитория `telegram-table-chart-bot`, а затем в Terminal:
+
 ```bash
-git init
-git add bot.py requirements.txt .gitignore README.md .env.example
-git commit -m "Create table chart Telegram bot"
-git branch -M main
-git remote add origin https://github.com/YOUR-USERNAME/telegram-table-chart-bot.git
-git push -u origin main
+cd ~/Downloads/telegram-table-chart-bot
+git status
+git add bot.py requirements.txt .gitignore .env.example README.md
+git commit -m "Upgrade table analysis and Groq vision"
+git push
 ```
-Если Git уже настроен в папке, не запускай `git init` или `git remote add origin` повторно.
 
-## 4. Развёртывание на FadeHost
-1. Создай отдельное приложение и подключи новый GitHub-репозиторий.
-2. Используй Python runtime.
-3. Команда запуска: `python bot.py`.
-4. Добавь переменные окружения по отдельности:
-   - `TELEGRAM_BOT_TOKEN` — токен от BotFather.
-   - `ANTHROPIC_API_KEY` — ключ Anthropic Console, нужен для фото.
-   - `CLAUDE_MODEL` — `claude-sonnet-4-6` (необязательно, это значение по умолчанию).
-5. Нажми Start/Deploy. В логах должно появиться `Бот для построения графиков запущен.`
+Если ты распаковывала ZIP в `~/Downloads/telegram-table-chart-agent`, скопируй файлы так:
 
-Не вставляй ключи в код или GitHub. Если FadeHost предлагает поля KEY/VALUE, заполни их по одному; если просит строки, используй `KEY=VALUE`.
-
-## 5. Проверка
-1. Открой нового бота в Telegram и нажми Start.
-2. Отправь таблицу текстом:
-```text
-Месяц;Продажи
-Январь;120
-Февраль;150
-Март;135
-Апрель;180
-```
-3. Выбери линейный или столбчатый график.
-4. Бот должен прислать PNG, Excel и краткую статистику.
-5. После настройки Claude проверь фото таблицы.
-
-## Как выбираются столбцы
-- Линейный/столбчатый: первый столбец — подписи X, первый подходящий числовой столбец — Y.
-- Точечный: первые два числовых столбца.
-- Круговой: первый столбец как категории и первый числовой столбец как значения.
-- Гистограмма: первый числовой столбец.
-Выбор столбцов кнопками пока не реализован; если нужно, его можно добавить следующим этапом.
-
-## Локальный запуск на Mac (необязательно)
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+cp ~/Downloads/telegram-table-chart-agent/bot.py ~/Downloads/telegram-table-chart-bot/
+cp ~/Downloads/telegram-table-chart-agent/requirements.txt ~/Downloads/telegram-table-chart-bot/
+cp ~/Downloads/telegram-table-chart-agent/.gitignore ~/Downloads/telegram-table-chart-bot/
+cp ~/Downloads/telegram-table-chart-agent/.env.example ~/Downloads/telegram-table-chart-bot/
+cp ~/Downloads/telegram-table-chart-agent/README.md ~/Downloads/telegram-table-chart-bot/
 ```
-Создай `.env` на основе `.env.example`, заполни ключи и запусти `python bot.py`.
+
+Не запускай повторно `git init` или `git remote add origin`, если репозиторий уже настроен.
